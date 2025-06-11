@@ -306,6 +306,7 @@
     
     # Temperatura dos tubos de parede d'água (T_p_K)
     T_p_K = T_v_K + 30                                                                   # Usar 20°C - 40°C
+    T_p_C = T_p_K - 273.15
     print(f"Temperatura dos tubos de parede d'água (T_p_K): {T_p_K:.4f} K") 
      
     # Superfície irradiada normal a chama - CONFERIR VALOR DE Fp                                                                                                                                      
@@ -580,8 +581,648 @@
     
     print("FIM DA ETAPA 9")
     print()
+
+    # ===================================================================================
+    # FASE 2: PREPARAÇÃO PARA A SIMULAÇÃO
+    # ===================================================================================
+    print("\n" + "="*60)
+    print("FASE 2: PREPARANDO CONSTANTES PARA A SIMULAÇÃO")
+    print("="*60)
     
+    # --- Armazenar os Resultados do Projeto Nominal em variáveis "_nom" ---
+    # Isso protege os valores originais e deixa o código mais claro.
+    m_dot_cb_nom = m_dot_cb
+    m_v_nom = m_v
+    p5_nom = P5
+    U_s_nom, U_r_nom, U_v_nom, U_e_nom, U_a_nom = U_s, U_r, U_v, U_e, U_a
+    S_i_nom, S_S_nom, S_R_nom, S_V_nom, S_E_nom, S_A_nom = S_i, S_S, S_R, S_V, S_E, S_A
+    h_s_nom, h_v_nom, h_r_nom, h_e_nom, h_1_nom, h_2_nom = h_s, h_v, h_r, h_e, h_1, h_2
+    T_SR_C_nom, T_v_C_nom, T_RV_C_nom, T_e_C_nom, theta2_C_nom = T_SR_C, T_v_C, T_RV_C, T_e_C, theta2_C
+    
+    # --- Calcular Calores Específicos Médios (Constantes para a simulação) ---
+    cps = (h_s_nom - h_v_nom) / (T_SR_C_nom - T_v_C_nom) if (T_SR_C_nom - T_v_C_nom) != 0 else 0
+    cpr = (h_r_nom - h_e_nom) / (T_RV_C_nom - T_e_C_nom) if (T_RV_C_nom - T_e_C_nom) != 0 else 0
+    c = (h_2_nom - h_1_nom) / (theta2_C_nom - theta1_C) if (theta2_C_nom - theta1_C) != 0 else 0
+    print(f"Calores específicos calculados: cps={cps:.4f}, cpr={cpr:.4f}, c={c:.4f}")
+    
+    # ===================================================================================
+    # FASE 3: DEFINIÇÃO DAS FUNÇÕES DE CÁLCULO PARA A SIMULAÇÃO
+    # ===================================================================================
+    #
+    # Aqui vamos inserir, uma a uma, as definições das funções para cada componente.
+    # Por enquanto, elas são apenas "placeholders".
+    #
 
+    def calcular_fornalha_simulacao(
+        # --- Parâmetros fixos (constantes da simulação, vindos do cálculo nominal) ---
+        S_i,                  # Área da fornalha calculada no projeto nominal [m²]
+        T_p_K,                # Temperatura da parede d'água [K] (calculada no nominal)
+        eta_F,                # Rendimento da fornalha (ex: 1 - (P1+P2+P3+P4))
+        AC,                   # Relação ar/combustível (calculado no nominal)
+        
+        # --- Parâmetros do combustível (do dicionário 'combustivel') ---
+        PCI,                  # PCI do combustível [kcal/kg]
+        emis_C,            # Emissividade da fornalha
+        cinzas_fracao,        # Teor de cinzas como fração (ex: 5% -> 0.05)
+        t_comb,               # Temperatura do combustível [°C]
+        C_cb,                 # Calor específico do combustível [kcal/kg°C]
+    
+        # --- Parâmetros de referência (geralmente fixos) ---
+        f_F,                  # Fator de perda da fornalha (ex: 0.4)
+        t_a_C,                # Temperatura ambiente [°C]
+        Cp_ar_F,              # Calor específico do ar na fornalha [kcal/kg°C]
+        Cp_0C, Cp_1200C,      # Pontos de referência para o Cpg
+        
+        # --- Parâmetros variáveis (do regime/iteração atual) ---
+        m_dot_cb_atual,       # Consumo de combustível do regime atual [kg/h]
+        p5_atual,             # Perda p5 corrigida para o regime atual
+        t_aq_estimado         # Temperatura do ar aquecido (estimada na iteração) [°C]
+        ):
+        
+        """
+        Passo 1 da Simulação: Calcula tc, Qi e sigma para a Fornalha.
+        Resolve a dependência circular entre tc e Cpg.
+        """
+        
+        beta = 4.875e-8 # Constante de Stefan-Boltzmann [kcal/m²hK⁴]
+        tc_estimado_loop = 1000.0 # Chute inicial para a temperatura da fornalha
+        
+        # Loop para convergir tc e Cpg
+        for i in range(10):
+            # Calcula Cpg com base no tc da iteração atual
+            T_media_gases = (tc_estimado_loop + t_a_C) / 2.0
+            Cp_g_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases / 1200)
+    
+            # Define a equação para o fsolve resolver
+            def equacao_fornalha(tc_array):
+                tc = tc_array[0]
+                Q_F = eta_F * m_dot_cb_atual * PCI
+                if Q_F <= 0: return tc
+    
+                # Tradução literal da fórmula da fornalha
+                termo_Qi = beta * emis_C * S_i * ((tc + 273.15)**4 - T_p_K**4)
+                termo_irradiacao = termo_Qi / Q_F
+                
+                numerador = (1 - termo_irradiacao) * eta_F * PCI + \
+                            AC * Cp_ar_F * (t_aq_estimado - t_a_C) + \
+                            C_cb * (t_comb - t_a_C) - \
+                            f_F * p5_atual * PCI
+                
+                # Usando a variável 'z' do PDF para a fração de cinzas
+                z = cinzas_fracao 
+                denominador = (AC + 1 - z) * Cp_g_atual
+                
+                tc_calculado = (numerador / denominador) + t_a_C
+                return tc_calculado - tc
+    
+            # Resolve a equação não-linear para encontrar um novo tc
+            tc_solucao = fsolve(equacao_fornalha, [tc_estimado_loop])[0]
+            
+            # Verifica a convergência e atualiza o chute se necessário
+            if abs(tc_solucao - tc_estimado_loop) < 0.1: break
+            tc_estimado_loop = tc_solucao
+            
+        # Define o valor final de tc como o último valor convergido
+        tc_final = tc_estimado_loop
+        
+        # "Então", como diz o PDF, calculamos Qi e sigma com o tc_final
+        Q_i_final = beta * emis_C * S_i * ((tc_final + 273.15)**4 - T_p_K**4)
+        Q_F_final = eta_F * m_dot_cb_atual * PCI
+        sigma_final = Q_i_final / Q_F_final if Q_F_final > 0 else 0
+    
+        return tc_final, Q_i_final, sigma_final
+    
+    def calcular_superaquecedor_simulacao(
+        # --- Parâmetros fixos (constantes da simulação) ---
+        S_S,                  # Área do superaquecedor (do projeto nominal) [m²]
+        h_s_nom,              # Entalpia nominal na saída (h_s do seu script) [kcal/kg]
+        h_v_nom,              # Entalpia do vapor saturado (precisa ser calculada no nominal) [kcal/kg]
+        cps,                  # Calor específico médio (calculado antes da simulação)
+        T_superaq,            # Temperatura alvo do superaquecedor (do cenário) [°C]
+        T_v_C,                # Temperatura de saturação (calculada no nominal) [°C]
+        
+        # --- Parâmetros gerais ---
+        AC,                   # Relação ar/combustível
+        z,                    # Fração de cinzas
+        f_S,                  # Fator de perda do superaquecedor (ex: 0.15)
+        Cp_0C, Cp_1200C,
+        
+        # --- Parâmetros variáveis (do regime/iteração atual) ---
+        tc_final,             # Temperatura de saída da fornalha (resultado do Passo 1) [°C]
+        m_dot_cb_atual,       # Consumo de combustível do regime atual [kg/h]
+        m_v_estimado,         # Vazão de vapor estimada na iteração [kg/h]
+        p5_atual,             # Perda p5 corrigida para o regime atual
+        Q_5_atual,
+        U_s_atual,            # Coeficiente U corrigido para o superaquecedor
+        PCI                   # PCI do combustível
+        ):
+        """
+        Passo 2 da Simulação: Calcula tS e tSR para o Superaquecedor.
+        Resolve o sistema 2x2 de equações e a dependência de Cpg.
+        """
+    
+        # Chutes iniciais para as temperaturas que queremos encontrar
+        tsr_estimado_loop = tc_final - 100 # Chute para a temperatura de saída dos gases
+        ts_estimado_chute = T_superaq      # Chute para a temperatura do vapor (valor nominal)
+    
+        for i in range(10): # Loop para convergir Cpg e tSR
+            T_media_gases = (tc_final + tsr_estimado_loop) / 2.0
+            Cp_g_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases / 1200)
+    
+            def sistema_superaquecedor(vars):
+                ts, tsr = vars
+                
+                # Equação para o calor absorvido pelo vapor
+                Q_S_calc = m_v_estimado * (h_s_nom - h_v_nom + cps * (ts - T_superaq))
+    
+                # Residual 1: Balanço de Energia
+                Q5_componente = p5_atual * m_dot_cb_atual * PCI * f_S
+                calor_gases = m_dot_cb_atual * (AC + 1 - z) * Cp_g_atual * (tc_final - tsr) - Q5_componente
+                residual1 = Q_S_calc - calor_gases
+                
+                # Residual 2: Transferência de Calor
+                delta_t1 = tc_final - ts
+                delta_t2 = tsr - T_v_C
+                
+                if delta_t1 <= 0 or delta_t2 <= 0 or abs(delta_t1 - delta_t2) < 1e-6:
+                    return [1e6, 1e6]
+                
+                delta_t_ls = (delta_t1 - delta_t2) / np.log(delta_t1 / delta_t2)
+                calor_conveccao = U_s_atual * S_S * delta_t_ls
+                residual2 = Q_S_calc - calor_conveccao
+    
+                return [residual1, residual2]
+    
+            try:
+                ts_solucao, tsr_solucao = fsolve(sistema_superaquecedor, [ts_estimado_chute, tsr_estimado_loop])
+            except Exception:
+                # Em caso de erro, retorna os chutes para não parar a simulação
+                return ts_estimado_chute, tsr_estimado_loop
+    
+            if abs(tsr_solucao - tsr_estimado_loop) < 0.1: break
+            tsr_estimado_loop = tsr_solucao
+    
+        ts_final = ts_solucao
+        tsr_final = tsr_estimado_loop
+        
+        return ts_final, tsr_final
+    
+    def calcular_reaquecedor_simulacao(
+        # --- Parâmetros fixos (constantes da simulação) ---
+        S_R,                  # Área do reaquecedor (do projeto nominal) [m²]
+        cpr,                  # Calor específico médio (calculado antes da simulação)
+        T_reaq,               # Temperatura alvo do reaquecedor (do cenário) [°C]
+        T_e_C,                # Temperatura de saturação na entrada do reaquecedor [°C]
+        h_r_reaq_nom,         # Entalpia nominal na saída do reaquecedor [kcal/kg]
+        h_e_reaq_nom,         # Entalpia nominal na entrada do reaquecedor [kcal/kg]
+        m_E_fracao,           # Fração mássica de reaquecimento (do cenário)
+        
+        # --- Parâmetros gerais ---
+        AC,                   # Relação ar/combustível
+        z,                    # Fração de cinzas
+        f_R,                  # Fator de perda do reaquecedor (ex: 0.15)
+        Cp_0C, Cp_1200C,
+        
+        # --- Parâmetros variáveis (do regime/iteração atual) ---
+        tsr_final,            # Temperatura de saída do superaquecedor (resultado do Passo 2) [°C]
+        m_dot_cb_atual,       # Consumo de combustível do regime atual [kg/h]
+        m_v_estimado,         # Vazão de vapor estimada na iteração [kg/h]
+        p5_atual,             # Perda p5 corrigida para o regime atual
+        U_r_atual,            # Coeficiente U corrigido para o reaquecedor
+        PCI
+        ):
+        """
+        Passo 3 da Simulação: Calcula tR e tRV para o Reaquecedor.
+        Resolve o sistema 2x2 de equações e a dependência de Cpg.
+        """
+    
+        # Chutes iniciais para as temperaturas que queremos encontrar
+        trv_estimado_loop = tsr_final - 100 # Chute para a temperatura de saída dos gases
+        tr_estimado_chute = T_reaq          # Chute para a temperatura do vapor (valor nominal)
+    
+        for i in range(10): # Loop para convergir Cpg e tRV
+            T_media_gases = (tsr_final + trv_estimado_loop) / 2.0
+            Cp_g_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases / 1200)
+    
+            def sistema_reaquecedor(vars):
+                tr, trv = vars
+                
+                # Equação para o calor absorvido pelo vapor
+                Q_R_calc = m_E_fracao * m_v_estimado * (h_r_reaq_nom - h_e_reaq_nom + cpr * (tr - T_reaq))
+    
+                # Residual 1: Balanço de Energia
+                Q5_componente = p5_atual * m_dot_cb_atual * PCI * f_R
+                calor_gases = m_dot_cb_atual * (AC + 1 - z) * Cp_g_atual * (tsr_final - trv) - Q5_componente
+                residual1 = Q_R_calc - calor_gases
+                
+                # Residual 2: Transferência de Calor
+                delta_t1 = tsr_final - tr
+                delta_t2 = trv - T_e_C
+                
+                if delta_t1 <= 0 or delta_t2 <= 0 or abs(delta_t1 - delta_t2) < 1e-6:
+                    return [1e6, 1e6]
+                
+                delta_t_lr = (delta_t1 - delta_t2) / np.log(delta_t1 / delta_t2)
+                calor_conveccao = U_r_atual * S_R * delta_t_lr
+                residual2 = Q_R_calc - calor_conveccao
+    
+                return [residual1, residual2]
+    
+            try:
+                tr_solucao, trv_solucao = fsolve(sistema_reaquecedor, [tr_estimado_chute, trv_estimado_loop])
+            except Exception:
+                return tr_estimado_chute, trv_estimado_loop
+    
+            if abs(trv_solucao - trv_estimado_loop) < 0.1: break
+            trv_estimado_loop = trv_solucao
+    
+        tr_final = tr_solucao
+        trv_final = trv_estimado_loop
+        
+        return tr_final, trv_final
+    
+    def calcular_vaporizador_simulacao(
+        # --- Parâmetros fixos (constantes da simulação) ---
+        S_V,                  # Área do vaporizador (do projeto nominal) [m²]
+        c,                    # Calor específico médio da água no economizador [kcal/kg°C]
+        T_v_C,                # Temperatura de saturação (calculada no nominal) [°C]
+        h_v_nom,              # Entalpia do vapor saturado (h_v) [kcal/kg]
+        h_1_nom,              # Entalpia da água de alimentação (h_1) [kcal/kg]
+        theta1,               # Temperatura da água de alimentação (do cenário) [°C]
+    
+        # --- Parâmetros gerais ---
+        AC,                   # Relação ar/combustível
+        z,                    # Fração de cinzas
+        f_V,                  # Fator de perda do vaporizador (ex: 0.1)
+        Cp_0C, Cp_1200C,
+        
+        # --- Parâmetros variáveis (do regime/iteração atual) ---
+        trv_final,            # Temperatura de saída do reaquecedor (resultado do Passo 3) [°C]
+        Qi_final,             # Calor irradiado, resultado da função da Fornalha [kcal/h]
+        m_dot_cb_atual,       # Consumo de combustível do regime atual [kg/h]
+        p5_atual,             # Perda p5 corrigida para o regime atual
+        U_v_atual,            # Coeficiente U corrigido para o vaporizador
+        theta2_estimado,      # A temperatura 'theta2' estimada para a iteração [°C]
+        PCI
+        ):
+        """
+        Passo 4 da Simulação: Calcula tVE, Qv e a nova vazão de vapor (m_v).
+        """
+    
+        # Chute inicial para tVE
+        tve_estimado_loop = trv_final - 100
+        
+        # Loop para convergir Cpg e tVE
+        for i in range(10):
+            T_media_gases = (trv_final + tve_estimado_loop) / 2.0
+            Cp_g_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases / 1200)
+    
+            def equacao_vaporizador(vars):
+                tve = vars[0]
+                
+                Q5_componente = p5_atual * m_dot_cb_atual * PCI * f_V
+                calor_gases = m_dot_cb_atual * (AC + 1 - z) * Cp_g_atual * (trv_final - tve) - Q5_componente
+                
+                delta_t1 = trv_final - T_v_C
+                delta_t2 = tve - T_v_C
+    
+                if delta_t1 <= 0 or delta_t2 <= 0 or abs(delta_t1 - delta_t2) < 1e-6:
+                    return 1e6
+    
+                delta_t_lv = (delta_t1 - delta_t2) / np.log(delta_t1 / delta_t2)
+                calor_conveccao = U_v_atual * S_V * delta_t_lv
+                
+                return calor_gases - calor_conveccao
+    
+            try:
+                tve_solucao = fsolve(equacao_vaporizador, [tve_estimado_loop])[0]
+            except Exception:
+                tve_solucao = tve_estimado_loop
+    
+            if abs(tve_solucao - tve_estimado_loop) < 0.1: break
+            tve_estimado_loop = tve_solucao
+            
+        tve_final = tve_estimado_loop
+        
+        # "Então", calculamos o calor Qv com o tve_final convergido
+        Q5_comp_final = p5_atual * m_dot_cb_atual * PCI * f_V
+        Q_v_final = m_dot_cb_atual * (AC + 1 - z) * Cp_g_atual * (trv_final - tve_final) - Q5_comp_final
+    
+        # E finalmente, recalculamos a vazão de vapor m_v
+        # Usando a aproximação h2 = h1 + c*(theta2 - theta1)
+        h2_aproximado = h_1_nom + c * (theta2_estimado - theta1)
+        denominador_mv = h_v_nom - h2_aproximado
+        
+        if denominador_mv <= 0:
+            print("  ERRO: Denominador nulo ou negativo ao calcular m_v.")
+            m_v_calculado = 0 # Retorna 0 em caso de erro
+        else:
+            m_v_calculado = (Q_v_final + Qi_final) / denominador_mv
+    
+        return tve_final, Q_v_final, m_v_calculado
+    
+    def calcular_economizador_simulacao(
+        # --- Parâmetros fixos (constantes da simulação) ---
+        S_E,                  # Área do economizador (do projeto nominal) [m²]
+        c,                    # Calor específico médio da água no economizador [kcal/kg°C]
+        theta1,               # Temperatura da água de alimentação (do cenário) [°C]
+    
+        # --- Parâmetros gerais ---
+        AC,                   # Relação ar/combustível
+        z,                    # Fração de cinzas
+        f_E,                  # Fator de perda do economizador (ex: 0.1)
+        Cp_0C, Cp_1200C,
+        
+        # --- Parâmetros variáveis (do regime/iteração atual) ---
+        tve_final,            # Temperatura de saída do vaporizador (resultado do Passo 4) [°C]
+        m_v_calculado,        # Vazão de vapor, recalculada no Passo 4 [kg/h]
+        m_dot_cb_atual,       # Consumo de combustível do regime atual [kg/h]
+        p5_atual,             # Perda p5 corrigida para o regime atual
+        U_e_atual,            # Coeficiente U corrigido para o economizador
+        PCI
+        ):
+        """
+        Passo 5 da Simulação: Calcula theta2 e tEA para o Economizador.
+        """
+    
+        # Chutes iniciais para as temperaturas
+        tea_estimado_loop = tve_final - 100
+        theta2_estimado_chute = theta1 + 20 # Um chute razoável
+    
+        for i in range(10): # Loop para convergir Cpg e tEA
+            T_media_gases = (tve_final + tea_estimado_loop) / 2.0
+            Cp_g_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases / 1200)
+    
+            def sistema_economizador(vars):
+                theta2, tea = vars
+                
+                # Equação para o calor absorvido pela água
+                Q_E_calc = m_v_calculado * c * (theta2 - theta1)
+    
+                # Residual 1: Balanço de Energia
+                Q5_componente = p5_atual * m_dot_cb_atual * PCI * f_E
+                calor_gases = m_dot_cb_atual * (AC + 1 - z) * Cp_g_atual * (tve_final - tea) - Q5_componente
+                residual1 = Q_E_calc - calor_gases
+                
+                # Residual 2: Transferência de Calor
+                delta_t1 = tve_final - theta2
+                delta_t2 = tea - theta1
+                
+                if delta_t1 <= 0 or delta_t2 <= 0 or abs(delta_t1 - delta_t2) < 1e-6:
+                    return [1e6, 1e6]
+                
+                delta_t_le = (delta_t1 - delta_t2) / np.log(delta_t1 / delta_t2)
+                calor_conveccao = U_e_atual * S_E * delta_t_le
+                residual2 = Q_E_calc - calor_conveccao
+    
+                return [residual1, residual2]
+    
+            try:
+                theta2_solucao, tea_solucao = fsolve(sistema_economizador, [theta2_estimado_chute, tea_estimado_loop])
+            except Exception:
+                return theta2_estimado_chute, tea_estimado_loop
+    
+            if abs(tea_solucao - tea_estimado_loop) < 0.1: break
+            tea_estimado_loop = tea_solucao
+    
+        theta2_final = theta2_solucao
+        tea_final = tea_estimado_loop
+        
+        return theta2_final, tea_final
+    
+    def calcular_aquecedor_ar_simulacao(
+        # --- Parâmetros fixos (constantes da simulação) ---
+        S_A,                  # Área do aquecedor de ar (do projeto nominal) [m²]
+        t_a_C,                # Temperatura do ar de entrada (ambiente) [°C]
+    
+        # --- Parâmetros gerais ---
+        AC,                   # Relação ar/combustível
+        z,                    # Fração de cinzas
+        f_A,                  # Fator de perda do aquecedor de ar (ex: 0.1)
+        Cp_0C, Cp_1200C,
+        
+        # --- Parâmetros variáveis (do regime/iteração atual) ---
+        tea_final,            # Temperatura de saída do economizador (resultado do Passo 5) [°C]
+        m_dot_cb_atual,       # Consumo de combustível do regime atual [kg/h]
+        p5_atual,             # Perda p5 corrigida para o regime atual
+        U_a_atual,            # Coeficiente U corrigido para o aquecedor de ar
+        PCI
+        ):
+        """
+        Passo 6 da Simulação: Calcula taq e tg para o Aquecedor de Ar.
+        """
+    
+        # Chutes iniciais para as temperaturas
+        tg_estimado_loop = tea_final - 150
+        taq_estimado_loop = 250
+    
+        for i in range(10): # Loop para convergir Cpg, Cpar, taq e tg
+            # Calcular Cpg (gases) com base na estimativa de tg
+            T_media_gases = (tea_final + tg_estimado_loop) / 2.0
+            Cp_g_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases / 1200)
+    
+            # Calcular Cpar (ar) com base na estimativa de taq
+            T_media_ar = (taq_estimado_loop + t_a_C) / 2.0
+            Cp_par_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_ar / 1200)
+    
+            def sistema_aquecedor_ar(vars):
+                taq, tg = vars
+                
+                # Calor total transferido para o componente (aquece o ar + perdas)
+                Q_A_calc = m_dot_cb_atual * AC * Cp_par_atual * (taq - t_a_C) + (p5_atual * m_dot_cb_atual * PCI * f_A)
+    
+                # Residual 1: Balanço de Energia
+                calor_gases = m_dot_cb_atual * (AC + 1 - z) * Cp_g_atual * (tea_final - tg)
+                residual1 = Q_A_calc - calor_gases
+                
+                # Residual 2: Transferência de Calor (com correção do typo do PDF Ue->Ua, Se->Sa)
+                delta_t1 = tea_final - taq
+                delta_t2 = tg - t_a_C
+                
+                if delta_t1 <= 0 or delta_t2 <= 0 or abs(delta_t1 - delta_t2) < 1e-6:
+                    return [1e6, 1e6]
+                
+                delta_t_la = (delta_t1 - delta_t2) / np.log(delta_t1 / delta_t2)
+                calor_conveccao = U_a_atual * S_A * delta_t_la
+                residual2 = Q_A_calc - calor_conveccao
+    
+                return [residual1, residual2]
+    
+            try:
+                taq_solucao, tg_solucao = fsolve(sistema_aquecedor_ar, [taq_estimado_loop, tg_estimado_loop])
+            except Exception:
+                return taq_estimado_loop, tg_estimado_loop
+    
+            if (abs(taq_solucao - taq_estimado_loop) < 0.1 and abs(tg_solucao - tg_estimado_loop) < 0.1): break
+                
+            taq_estimado_loop = taq_solucao
+            tg_estimado_loop = tg_solucao
+            
+        taq_final = taq_estimado_loop
+        tg_final = tg_estimado_loop
+        
+        return taq_final, tg_final
+# ... e assim por diante para Reaquecedor, Vaporizador, Economizador e Aquecedor de Ar.
 
-
-
+    # ===================================================================================
+    # FASE 4: EXECUÇÃO DA SIMULAÇÃO
+    # ===================================================================================
+    print("\n" + "="*60)
+    print("FASE 4: INICIANDO SIMULAÇÃO PARA DIFERENTES REGIMES")
+    print("="*60)
+    
+    # Lista para armazenar o dicionário de resultados de cada regime convergido
+    resultados_finais = []
+    # Define os regimes de operação a serem simulados
+    regimes_R = np.arange(30, 121, 10)
+    
+    # --- Chutes iniciais para o PRIMEIRO regime de operação ---
+    # Usamos os valores nominais como ponto de partida
+    ts_estimado = T_SR_C_nom
+    tr_estimado = T_RV_C_nom
+    theta2_estimado = theta2_C_nom
+    taq_estimado = T_ar_aq_C # Do seu código de projeto original
+    # Chutes para temperaturas intermediárias dos gases (valores razoáveis)
+    tsr_estimado = ts_estimado + 50 
+    trv_estimado = tr_estimado + 50
+    tve_estimado = 400
+    tea_estimado = 300
+    tg_estimado = 160
+    
+    # --- Loop Principal Externo (para cada regime de operação) ---
+    for R_perc in regimes_R:
+        print(f"\n--- CALCULANDO PARA O REGIME DE {R_perc}% ---")
+        
+        # a) Calcular parâmetros que dependem diretamente do regime
+        m_dot_cb_atual = m_dot_cb_nom * (R_perc / 100)
+        p5_atual = p5_nom * (100 / R_perc)**0.9 if R_perc > 0 else p5_nom
+        
+        # Corrigir os coeficientes U para o regime atual
+        U_s_atual = U_s_nom * (m_dot_cb_atual / m_dot_cb_nom)**0.62
+        U_r_atual = U_r_nom * (m_dot_cb_atual / m_dot_cb_nom)**0.62
+        U_v_atual = U_v_nom * (m_dot_cb_atual / m_dot_cb_nom)**0.62
+        U_e_atual = U_e_nom * (m_dot_cb_atual / m_dot_cb_nom)**0.62
+        U_a_atual = U_a_nom * (m_dot_cb_atual / m_dot_cb_nom)**0.86
+        
+        Q_F_atual = eta_F * m_dot_cb_atual * PCI
+        Q_5_atual = p5_atual * m_dot_cb_atual * PCI
+        m_v_estimado = m_v_nom * R_perc/100     
+    
+        # b) "Grande Iteração" (loop interno para convergir o sistema)
+        for i in range(50): # Limite de 50 iterações para evitar loop infinito
+            
+            # Guardar valores da iteração anterior para checar a convergência
+            m_v_antigo = m_v_estimado
+            ts_antigo, tr_antigo, theta2_antigo, taq_antigo = ts_estimado, tr_estimado, theta2_estimado, taq_estimado
+    
+            # --- c) Chamar as funções dos componentes em sequência ---
+            
+            # 1. Fornalha
+            tc_final, Qi_final, sigma_final = calcular_fornalha_simulacao(
+                S_i=S_i_nom, T_p_K=T_p_K, eta_F=eta_F, AC=AC, PCI=PCI, emis_C=emis_C,
+                cinzas_fracao=z, t_comb=T_cb_C, C_cb=C_cb, f_F=f_F, t_a_C=T_amb_C,
+                Cp_ar_F=Cp_ar_F, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C,
+                m_dot_cb_atual=m_dot_cb_atual, p5_atual=p5_atual, t_aq_estimado=taq_estimado
+            )
+                
+            # 2. Superaquecedor
+            ts_final, tsr_final = calcular_superaquecedor_simulacao(
+                tc_final=tc_final, m_dot_cb_atual=m_dot_cb_atual, m_v_estimado=m_v_estimado,
+                Q_5_atual=Q_5_atual, U_s_atual=U_s_atual, S_S=S_S_nom, h_s_nom=h_s_nom, h_v_nom=h_v_nom,
+                cps=cps, T_superaq=T_SR_C_nom, T_v_C=T_v_C_nom, AC=AC, z=z, f_S=f_S,
+                Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI,
+                ts_chute=ts_estimado, tsr_chute=tsr_estimado
+            )
+            
+            # 3. Reaquecedor
+            tr_final, trv_final = calcular_reaquecedor_simulacao(
+                tsr_entrada=tsr_final, m_dot_cb_atual=m_dot_cb_atual, m_v_estimado=m_v_estimado,
+                Q_5_atual=Q_5_atual, U_r_atual=U_r_atual, S_R=S_R_nom, m_E_fracao=m_e,
+                h_r_reaq_nom=h_r_nom, h_e_reaq_nom=h_e_nom, cpr=cpr, T_reaq=T_RV_C_nom, T_e_C=T_e_C_nom,
+                AC=AC, z=z, f_R=f_R, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI,
+                tr_chute=tr_estimado, trv_chute=trv_estimado
+            )
+            
+            # 4. Vaporizador (calcula a nova vazão de vapor)
+            tve_final, Qv_final, m_v_calculado = calcular_vaporizador_simulacao(
+                trv_entrada=trv_final, Qi_final=Qi_final, m_dot_cb_atual=m_dot_cb_atual,
+                p5_atual=p5_atual, U_v_atual=U_v_atual, theta2_estimado=theta2_estimado,
+                S_V=S_V_nom, h_v_nom=h_v_nom, h_1_nom=h_1_nom, c=c, T_v_C=T_v_C_nom,
+                theta1=theta1_C_nom, AC=AC, z=z, f_V=f_V, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI
+            )
+            
+            # 5. Economizador
+            theta2_final, tea_final = calcular_economizador_simulacao(
+                tve_entrada=tve_final, m_v_calculado=m_v_calculado, m_dot_cb_atual=m_dot_cb_atual,
+                Q_5_atual=Q_5_atual, U_e_atual=U_e_atual, S_E=S_E_nom, c=c, theta1=theta1_C_nom,
+                AC=AC, z=z, f_E=f_E, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI,
+                theta2_chute=theta2_estimado, tea_chute=tea_estimado
+            )
+        
+            # 6. Aquecedor de Ar
+            taq_final, tg_final = calcular_aquecedor_ar_simulacao(
+                tea_entrada=tea_final, m_dot_cb_atual=m_dot_cb_atual, Q_5_atual=Q_5_atual,
+                U_a_atual=U_a_atual, S_A=S_A_nom, t_a_C=T_amb_C, AC=AC, z=z, f_A=f_A,
+                Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI,
+                taq_chute=taq_estimado, tg_chute=tg_estimado
+    )
+    
+            # --- d) Atualizar as estimativas para a próxima iteração ---
+            m_v_estimado = m_v_calculado
+            ts_estimado = ts_final
+            tr_estimado = tr_final
+            theta2_estimado = theta2_final
+            taq_estimado = taq_final
+            # Atualizar chutes das temperaturas intermediárias também
+            tsr_estimado, trv_estimado, tve_estimado, tea_estimado, tg_estimado = tsr_final, trv_final, tve_final, tea_final, tg_final
+            
+            # --- e) Checar a convergência da "Grande Iteração" ---
+            erro_mv = abs((m_v_estimado - m_v_antigo) / m_v_antigo) if m_v_antigo > 0 else 1.0
+            erro_ts = abs(ts_estimado - ts_antigo)
+            erro_tr = abs(tr_estimado - tr_antigo)
+            erro_theta2 = abs(theta2_estimado - theta2_antigo)
+            erro_taq = abs(taq_estimado - taq_antigo)
+            
+            # Critérios do PDF: ±0.5% para vazão de vapor, ±1°C para temperaturas
+            if erro_mv < 0.005 and erro_ts < 1.0 and erro_tr < 1.0 and erro_theta2 < 1.0 and erro_taq < 1.0:
+                print(f"  --> Sistema convergiu na iteração {i+1} para {R_perc}%.")
+                
+                # --- f) Cálculos finais após a convergência do regime ---
+                T_media_gases_chamine = (tg_final + t_a_C) / 2.0
+                Cpg_chamine_final = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases_chamine / 1200)
+                p6_final = (m_dot_cb_atual * (AC + 1 - z) * Cpg_chamine_final * (tg_final - t_a_C)) / (m_dot_cb_atual * PCI)
+                eta_Final = 1 - (P1 + P2 + P3 + P4 + p5_atual + p6_final)
+    
+                # --- g) Armazenar os resultados finais ---
+                resultado_regime = {
+                    'regime_%': R_perc,
+                    'm_cb_kg_h': m_dot_cb_atual,
+                    'm_v_kg_h': m_v_estimado,
+                    'rendimento': eta_Final * 100, # em %
+                    't_c': tc_final,
+                    't_s': ts_final,
+                    't_r': tr_final,
+                    'theta2': theta2_final,
+                    't_aq': taq_final,
+                    't_g': tg_final
+                }
+                resultados_finais.append(resultado_regime)
+                
+                # Sair do loop da "Grande Iteração"
+                break
+            
+    else: # Este 'else' pertence ao 'for i' e executa se o break não ocorrer
+        print(f"  ALERTA: Sistema não convergiu para {R_perc}% após 50 iterações.")
+    
+    # ===================================================================================
+    # FASE 5: ANÁLISE E PLOTAGEM DOS RESULTADOS FINAIS
+    # ===================================================================================
+    print("\n\n" + "="*60)
+    print("FASE 5: RESULTADOS FINAIS DA SIMULAÇÃO")
+    print("="*60)
+    
+    df_resultados = pd.DataFrame(resultados_finais)
+    print(df_resultados)
+    
+    # Chamar a função para gerar os gráficos
+    # gerar_graficos_operacionais(df_resultados)
