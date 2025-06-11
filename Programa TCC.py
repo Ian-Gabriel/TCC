@@ -1,6 +1,7 @@
     import numpy as np
     from CoolProp.CoolProp import PropsSI
     from scipy.optimize import fsolve
+    import pandas as pd # <-- ADICIONAR ESTA LINHA
     
     #from scipy.optimize import fsolve
     #import matplotlib.pyplot as plt
@@ -629,7 +630,7 @@
     
         # --- Parâmetros de referência (geralmente fixos) ---
         f_F,                  # Fator de perda da fornalha (ex: 0.4)
-        t_a_C,                # Temperatura ambiente [°C]
+        T_amb_C,                # Temperatura ambiente [°C]
         Cp_ar_F,              # Calor específico do ar na fornalha [kcal/kg°C]
         Cp_0C, Cp_1200C,      # Pontos de referência para o Cpg
         
@@ -650,7 +651,7 @@
         # Loop para convergir tc e Cpg
         for i in range(10):
             # Calcula Cpg com base no tc da iteração atual
-            T_media_gases = (tc_estimado_loop + t_a_C) / 2.0
+            T_media_gases = (tc_estimado_loop + T_amb_C) / 2.0
             Cp_g_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases / 1200)
     
             # Define a equação para o fsolve resolver
@@ -664,15 +665,15 @@
                 termo_irradiacao = termo_Qi / Q_F
                 
                 numerador = (1 - termo_irradiacao) * eta_F * PCI + \
-                            AC * Cp_ar_F * (t_aq_estimado - t_a_C) + \
-                            C_cb * (t_comb - t_a_C) - \
+                            AC * Cp_ar_F * (t_aq_estimado - T_amb_C) + \
+                            C_cb * (t_comb - T_amb_C) - \
                             f_F * p5_atual * PCI
                 
                 # Usando a variável 'z' do PDF para a fração de cinzas
                 z = cinzas_fracao 
                 denominador = (AC + 1 - z) * Cp_g_atual
                 
-                tc_calculado = (numerador / denominador) + t_a_C
+                tc_calculado = (numerador / denominador) + T_amb_C
                 return tc_calculado - tc
     
             # Resolve a equação não-linear para encontrar um novo tc
@@ -712,7 +713,6 @@
         m_dot_cb_atual,       # Consumo de combustível do regime atual [kg/h]
         m_v_estimado,         # Vazão de vapor estimada na iteração [kg/h]
         p5_atual,             # Perda p5 corrigida para o regime atual
-        Q_5_atual,
         U_s_atual,            # Coeficiente U corrigido para o superaquecedor
         PCI                   # PCI do combustível
         ):
@@ -993,7 +993,7 @@
     def calcular_aquecedor_ar_simulacao(
         # --- Parâmetros fixos (constantes da simulação) ---
         S_A,                  # Área do aquecedor de ar (do projeto nominal) [m²]
-        t_a_C,                # Temperatura do ar de entrada (ambiente) [°C]
+        T_amb_C,                # Temperatura do ar de entrada (ambiente) [°C]
     
         # --- Parâmetros gerais ---
         AC,                   # Relação ar/combustível
@@ -1022,14 +1022,14 @@
             Cp_g_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases / 1200)
     
             # Calcular Cpar (ar) com base na estimativa de taq
-            T_media_ar = (taq_estimado_loop + t_a_C) / 2.0
+            T_media_ar = (taq_estimado_loop + T_amb_C) / 2.0
             Cp_par_atual = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_ar / 1200)
     
             def sistema_aquecedor_ar(vars):
                 taq, tg = vars
                 
                 # Calor total transferido para o componente (aquece o ar + perdas)
-                Q_A_calc = m_dot_cb_atual * AC * Cp_par_atual * (taq - t_a_C) + (p5_atual * m_dot_cb_atual * PCI * f_A)
+                Q_A_calc = m_dot_cb_atual * AC * Cp_par_atual * (taq - T_amb_C) + (p5_atual * m_dot_cb_atual * PCI * f_A)
     
                 # Residual 1: Balanço de Energia
                 calor_gases = m_dot_cb_atual * (AC + 1 - z) * Cp_g_atual * (tea_final - tg)
@@ -1037,7 +1037,7 @@
                 
                 # Residual 2: Transferência de Calor (com correção do typo do PDF Ue->Ua, Se->Sa)
                 delta_t1 = tea_final - taq
-                delta_t2 = tg - t_a_C
+                delta_t2 = tg - T_amb_C
                 
                 if delta_t1 <= 0 or delta_t2 <= 0 or abs(delta_t1 - delta_t2) < 1e-6:
                     return [1e6, 1e6]
@@ -1120,51 +1120,48 @@
             # 1. Fornalha
             tc_final, Qi_final, sigma_final = calcular_fornalha_simulacao(
                 S_i=S_i_nom, T_p_K=T_p_K, eta_F=eta_F, AC=AC, PCI=PCI, emis_C=emis_C,
-                cinzas_fracao=z, t_comb=T_cb_C, C_cb=C_cb, f_F=f_F, t_a_C=T_amb_C,
+                cinzas_fracao=z, t_comb=T_cb_C, C_cb=C_cb, f_F=f_F, T_amb_C=T_amb_C,
                 Cp_ar_F=Cp_ar_F, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C,
                 m_dot_cb_atual=m_dot_cb_atual, p5_atual=p5_atual, t_aq_estimado=taq_estimado
             )
                 
             # 2. Superaquecedor
             ts_final, tsr_final = calcular_superaquecedor_simulacao(
+                S_S=S_S_nom, h_s_nom=h_s_nom, h_v_nom=h_v_nom, cps=cps, T_superaq=T_SR_C, 
+                T_v_C=T_v_C_nom, AC=AC, z=z, f_S=f_S, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C,
                 tc_final=tc_final, m_dot_cb_atual=m_dot_cb_atual, m_v_estimado=m_v_estimado,
-                Q_5_atual=Q_5_atual, U_s_atual=U_s_atual, S_S=S_S_nom, h_s_nom=h_s_nom, h_v_nom=h_v_nom,
-                cps=cps, T_superaq=T_SR_C_nom, T_v_C=T_v_C_nom, AC=AC, z=z, f_S=f_S,
-                Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI,
-                ts_chute=ts_estimado, tsr_chute=tsr_estimado
+                p5_atual=p5_atual, U_s_atual=U_s_atual, PCI=PCI
             )
             
             # 3. Reaquecedor
             tr_final, trv_final = calcular_reaquecedor_simulacao(
-                tsr_entrada=tsr_final, m_dot_cb_atual=m_dot_cb_atual, m_v_estimado=m_v_estimado,
-                Q_5_atual=Q_5_atual, U_r_atual=U_r_atual, S_R=S_R_nom, m_E_fracao=m_e,
-                h_r_reaq_nom=h_r_nom, h_e_reaq_nom=h_e_nom, cpr=cpr, T_reaq=T_RV_C_nom, T_e_C=T_e_C_nom,
-                AC=AC, z=z, f_R=f_R, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI,
-                tr_chute=tr_estimado, trv_chute=trv_estimado
+                S_R=S_R_nom, cpr=cpr, T_reaq=T_RV_C, T_e_C=T_e_C_nom, h_r_reaq_nom=h_r_nom,
+                h_e_reaq_nom=h_e_nom, m_E_fracao=m_e, AC=AC, z=z, f_R=f_R, Cp_0C=Cp_0C,
+                Cp_1200C=Cp_1200C, tsr_final=tsr_final, m_dot_cb_atual=m_dot_cb_atual,
+                m_v_estimado=m_v_estimado, p5_atual=p5_atual, U_r_atual=U_r_atual, PCI=PCI
             )
             
             # 4. Vaporizador (calcula a nova vazão de vapor)
             tve_final, Qv_final, m_v_calculado = calcular_vaporizador_simulacao(
-                trv_entrada=trv_final, Qi_final=Qi_final, m_dot_cb_atual=m_dot_cb_atual,
-                p5_atual=p5_atual, U_v_atual=U_v_atual, theta2_estimado=theta2_estimado,
-                S_V=S_V_nom, h_v_nom=h_v_nom, h_1_nom=h_1_nom, c=c, T_v_C=T_v_C_nom,
-                theta1=theta1_C_nom, AC=AC, z=z, f_V=f_V, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI
+               S_V=S_V_nom, c=c, T_v_C=T_v_C_nom, h_v_nom=h_v_nom, h_1_nom=h_1_nom,
+               theta1=theta1_C,AC=AC, z=z, f_V=f_V, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C,
+               trv_final=trv_final, Qi_final=Qi_final, m_dot_cb_atual=m_dot_cb_atual,
+               p5_atual=p5_atual, U_v_atual=U_v_atual, theta2_estimado=theta2_estimado, PCI=PCI
             )
             
             # 5. Economizador
             theta2_final, tea_final = calcular_economizador_simulacao(
-                tve_entrada=tve_final, m_v_calculado=m_v_calculado, m_dot_cb_atual=m_dot_cb_atual,
-                Q_5_atual=Q_5_atual, U_e_atual=U_e_atual, S_E=S_E_nom, c=c, theta1=theta1_C_nom,
-                AC=AC, z=z, f_E=f_E, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI,
-                theta2_chute=theta2_estimado, tea_chute=tea_estimado
+                S_E=S_E_nom, c=c, theta1=theta1_C,  # <-- CORRIGIDO: Usando a variável correta 'theta1_C'
+                AC=AC, z=z, f_E=f_E, Cp_0C=Cp_0C, Cp_1200C=Cp_1200C,
+                tve_final=tve_final, m_v_calculado=m_v_calculado,
+                m_dot_cb_atual=m_dot_cb_atual, p5_atual=p5_atual, U_e_atual=U_e_atual, PCI=PCI
             )
         
             # 6. Aquecedor de Ar
             taq_final, tg_final = calcular_aquecedor_ar_simulacao(
-                tea_entrada=tea_final, m_dot_cb_atual=m_dot_cb_atual, Q_5_atual=Q_5_atual,
-                U_a_atual=U_a_atual, S_A=S_A_nom, t_a_C=T_amb_C, AC=AC, z=z, f_A=f_A,
-                Cp_0C=Cp_0C, Cp_1200C=Cp_1200C, PCI=PCI,
-                taq_chute=taq_estimado, tg_chute=tg_estimado
+                S_A=S_A_nom, T_amb_C=T_amb_C, AC=AC, z=z, f_A=f_A, Cp_0C=Cp_0C,
+                Cp_1200C=Cp_1200C, tea_final=tea_final, m_dot_cb_atual=m_dot_cb_atual,
+                p5_atual=p5_atual, U_a_atual=U_a_atual, PCI=PCI
     )
     
             # --- d) Atualizar as estimativas para a próxima iteração ---
@@ -1188,9 +1185,9 @@
                 print(f"  --> Sistema convergiu na iteração {i+1} para {R_perc}%.")
                 
                 # --- f) Cálculos finais após a convergência do regime ---
-                T_media_gases_chamine = (tg_final + t_a_C) / 2.0
+                T_media_gases_chamine = (tg_final + T_amb_C) / 2.0
                 Cpg_chamine_final = Cp_0C + (Cp_1200C - Cp_0C) * (T_media_gases_chamine / 1200)
-                p6_final = (m_dot_cb_atual * (AC + 1 - z) * Cpg_chamine_final * (tg_final - t_a_C)) / (m_dot_cb_atual * PCI)
+                p6_final = (m_dot_cb_atual * (AC + 1 - z) * Cpg_chamine_final * (tg_final - T_amb_C)) / (m_dot_cb_atual * PCI)
                 eta_Final = 1 - (P1 + P2 + P3 + P4 + p5_atual + p6_final)
     
                 # --- g) Armazenar os resultados finais ---
